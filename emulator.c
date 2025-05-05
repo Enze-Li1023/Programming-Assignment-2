@@ -34,6 +34,7 @@
    - fixed C style to adhere to current programming style
 
    ********************************************************************* */
+#define BIDIRECTIONAL 0
 #include <stdlib.h>
 #include <stdio.h>
 #include "emulator.h"
