@@ -1,16 +1,29 @@
 #ifndef SR_H
 #define SR_H
 
-extern void A_init(void);
-extern void B_init(void);
-extern void A_input(struct pkt);
-extern void B_input(struct pkt);
-extern void A_output(struct msg);
-extern void A_timerinterrupt(void);
+#define SEQSPACE 8
+#define RTT 15.0
 
-/* included for extension to bidirectional communication */
-#define BIDIRECTIONAL 0       /*  0 = A->B  1 =  A<->B */
-extern void B_output(struct msg);
-extern void B_timerinterrupt(void);
+struct msg {
+    char data[20];
+};
+
+struct pkt {
+    int seqnum;
+    int acknum;
+    int checksum;
+    char payload[20];
+};
+
+// A-side functions
+void A_output(struct msg message);
+void A_input(struct pkt packet);
+void A_timerinterrupt();
+void A_init();
+
+// B-side functions
+void B_input(struct pkt packet);
+void B_output(struct msg message);
+void B_init();
 
 #endif
