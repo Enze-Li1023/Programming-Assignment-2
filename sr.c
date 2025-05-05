@@ -1,39 +1,56 @@
 #include "sr.h"
+#include <stdio.h>
 #include <string.h>
+
+#define TRUE 1
+#define FALSE 0
+
+int base_A;
+int nextseqnum_A;
+int expected_seqnum_B;
+int window_size = WINDOWSIZE;
+int acked[SEQSPACE];
+struct pkt send_buffer[SEQSPACE];
+struct pkt recv_buffer[SEQSPACE];
 
 int ComputeChecksum(struct pkt packet) {
     int checksum = 0;
     int i;
-    checksum += packet.seqnum + packet.acknum;
+    checksum += packet.seqnum;
+    checksum += packet.acknum;
     for (i = 0; i < 20; i++) {
-        checksum += packet.payload[i];
+        checksum += (int)packet.payload[i];
     }
     return checksum;
 }
 
-/* A side */
+int is_corrupted(struct pkt packet) {
+    return ComputeChecksum(packet) != packet.checksum;
+}
 
-int base_A = 0;
-int nextseqnum_A = 0;
-struct pkt window_A[SEQSPACE];
-int window_A_valid[SEQSPACE];
+int in_window(int seqnum, int base, int size) {
+    return (seqnum >= base && seqnum < base + size) || 
+           (base + size >= SEQSPACE && seqnum < (base + size) % SEQSPACE);
+}
 
 void A_output(struct msg message) {
-    if ((nextseqnum_A + SEQSPACE - base_A) % SEQSPACE >= WINDOWSIZE) {
-        printf("A_output: Window is full, dropping message.\n");
+    if ((nextseqnum_A + SEQSPACE - base_A) % SEQSPACE >= window_size) {
         return;
     }
 
     struct pkt packet;
+    int i;
+
     packet.seqnum = nextseqnum_A;
     packet.acknum = 0;
-    memcpy(packet.payload, message.data, 20);
+    for (i = 0; i < 20; i++) {
+        packet.payload[i] = message.data[i];
+    }
     packet.checksum = ComputeChecksum(packet);
 
-    window_A[packet.seqnum % SEQSPACE] = packet;
-    window_A_valid[packet.seqnum % SEQSPACE] = 1;
-
+    send_buffer[nextseqnum_A] = packet;
     tolayer3(0, packet);
+
     if (base_A == nextseqnum_A) {
         starttimer(0, RTT);
     }
@@ -42,98 +59,70 @@ void A_output(struct msg message) {
 }
 
 void A_input(struct pkt packet) {
-    if (ComputeChecksum(packet) != packet.checksum) {
+    int acknum = packet.acknum;
+
+    if (is_corrupted(packet) || !in_window(acknum, base_A, window_size)) {
         return;
     }
 
-    int acknum = packet.acknum;
-    if ((base_A <= acknum && acknum < nextseqnum_A) ||
-        (nextseqnum_A < base_A && (acknum < nextseqnum_A || acknum >= base_A))) {
+    acked[acknum] = TRUE;
 
-        window_A_valid[acknum % SEQSPACE] = 0;
+    while (acked[base_A]) {
+        acked[base_A] = FALSE;
+        base_A = (base_A + 1) % SEQSPACE;
+    }
 
-        while (!window_A_valid[base_A % SEQSPACE] &&
-               base_A != nextseqnum_A) {
-            base_A = (base_A + 1) % SEQSPACE;
-        }
-
-        if (base_A == nextseqnum_A) {
-            stoptimer(0);
-        } else {
-            starttimer(0, RTT);
-        }
+    if (base_A == nextseqnum_A) {
+        stoptimer(0);
+    } else {
+        starttimer(0, RTT);
     }
 }
 
-void A_timerinterrupt(void) {
+void A_timerinterrupt() {
     int i;
-    for (i = 0; i < SEQSPACE; i++) {
-        if (window_A_valid[i]) {
-            tolayer3(0, window_A[i]);
-            break; /* simulate independent timers */
+    for (i = 0; i < window_size; i++) {
+        int seq = (base_A + i) % SEQSPACE;
+        if (!acked[seq]) {
+            tolayer3(0, send_buffer[seq]);
         }
     }
     starttimer(0, RTT);
 }
 
-void A_init(void) {
-    int i;
+void A_init() {
     base_A = 0;
     nextseqnum_A = 0;
-    for (i = 0; i < SEQSPACE; i++) {
-        window_A_valid[i] = 0;
-    }
+    memset(acked, 0, sizeof(acked));
 }
 
-/* B side */
-
-int expected_seqnum_B = 0;
-struct pkt buffer_B[SEQSPACE];
-int buffer_B_valid[SEQSPACE];
-
 void B_input(struct pkt packet) {
-    if (ComputeChecksum(packet) != packet.checksum) {
+    int seqnum = packet.seqnum;
+    int i;
+
+    if (is_corrupted(packet)) {
         return;
     }
 
-    int seqnum = packet.seqnum;
-    if (seqnum == expected_seqnum_B) {
-        tolayer5(1, packet.payload);
-        buffer_B_valid[seqnum % SEQSPACE] = 0;
+    if (in_window(seqnum, expected_seqnum_B, window_size)) {
+        recv_buffer[seqnum] = packet;
+
+        struct pkt ack_pkt;
+        ack_pkt.seqnum = 0;
+        ack_pkt.acknum = seqnum;
+        ack_pkt.checksum = ComputeChecksum(ack_pkt);
+        tolayer3(1, ack_pkt);
+    }
+
+    while (recv_buffer[expected_seqnum_B].checksum != 0 &&
+           !is_corrupted(recv_buffer[expected_seqnum_B])) {
+        tolayer5(1, recv_buffer[expected_seqnum_B].payload);
+        memset(&recv_buffer[expected_seqnum_B], 0, sizeof(struct pkt));
         expected_seqnum_B = (expected_seqnum_B + 1) % SEQSPACE;
-
-        while (buffer_B_valid[expected_seqnum_B % SEQSPACE]) {
-            tolayer5(1, buffer_B[expected_seqnum_B % SEQSPACE].payload);
-            buffer_B_valid[expected_seqnum_B % SEQSPACE] = 0;
-            expected_seqnum_B = (expected_seqnum_B + 1) % SEQSPACE;
-        }
-    } else if ((expected_seqnum_B < seqnum && seqnum < expected_seqnum_B + WINDOWSIZE) ||
-               (expected_seqnum_B + WINDOWSIZE >= SEQSPACE &&
-                ((seqnum < (expected_seqnum_B + WINDOWSIZE) % SEQSPACE) || seqnum >= expected_seqnum_B))) {
-        buffer_B[seqnum % SEQSPACE] = packet;
-        buffer_B_valid[seqnum % SEQSPACE] = 1;
     }
-
-    struct pkt ack_pkt;
-    ack_pkt.seqnum = 0;
-    ack_pkt.acknum = seqnum;
-    memset(ack_pkt.payload, 0, 20);
-    ack_pkt.checksum = ComputeChecksum(ack_pkt);
-    tolayer3(1, ack_pkt);
 }
 
-void B_output(struct msg message) {
-    /* B doesn’t send messages */
-}
-
-void B_timerinterrupt(void) {
-    /* No timer on B side */
-}
-
-void B_init(void) {
-    int i;
+void B_init() {
     expected_seqnum_B = 0;
-    for (i = 0; i < SEQSPACE; i++) {
-        buffer_B_valid[i] = 0;
-    }
+    memset(recv_buffer, 0, sizeof(recv_buffer));
 }
