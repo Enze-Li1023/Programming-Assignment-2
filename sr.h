@@ -1,29 +1,17 @@
 #ifndef SR_H
 #define SR_H
 
-#define SEQSPACE 8
-#define RTT 15.0
+/* 不要重新定义 struct msg 和 struct pkt */
 
-struct msg {
-    char data[20];
-};
-
-struct pkt {
-    int seqnum;
-    int acknum;
-    int checksum;
-    char payload[20];
-};
-
-// A-side functions
+/* A-side functions */
+void A_init(void);
 void A_output(struct msg message);
 void A_input(struct pkt packet);
-void A_timerinterrupt();
-void A_init();
+void A_timerinterrupt(void);
 
-// B-side functions
+/* B-side functions */
+void B_init(void);
 void B_input(struct pkt packet);
-void B_output(struct msg message);
-void B_init();
+void B_output(struct msg message);  // 如果你有实现此函数
 
 #endif
